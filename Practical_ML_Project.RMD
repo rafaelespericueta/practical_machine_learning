@@ -1,0 +1,181 @@
+---
+title: "Practical Machine Learning Project"
+author: "Rafael Espericueta"
+date: "08/17/2014"
+output: html_document
+---
+
+### Overview
+
+Human Activity Recognition, *HAR*, is a currently an active area of reasearch. Our goal is to classify from sets of measurements in the HAR Dataset for Benchmarking if a curl with dumbells was done correctly, or if not, in what way. Our data is from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available here: 
+<http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset). 
+In this project we used a random forest model, since the target variable (to be predicted) is catagorical, and random forests are known to often work well on such data sets. We used cross-validation on a grid-search to find an optimal setting for the one tunable parameter, the number of features to use per tree, and was thus able to improve upon the default setting (using the *caret* package's *train* function). Our final model achieved 99.4% accuracy on a held-out test set, and its predictions on the final test set of 20 cases for submission achieved 100% accuracy. With this data set we were able to train a classifier that almost always can accurately analyze how the exercise was performed, correctly or incorrectly in which particular way.
+
+
+### Data Munging
+
+The following is the code used to download and read the data files into RStudio:
+
+```{r results='hide', message=FALSE, warning=FALSE}
+
+library(RCurl)
+
+# The training data for this project are available here: 
+trainURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv" 
+# The test data are available here: 
+testURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+# If needed, create a new data directory.
+if (!file.exists("data"))  { dir.create("data")}
+
+# Download and read the training and test data.
+train_filename <- "./data/train.csv"; test_filename <- "./data/test.csv"
+#download.file(trainURL, destfile = train_filename, method="curl")
+#download.file(testURL, destfile = test_filename, method="curl")
+#dateDownloaded <- date()
+alldat <- read.csv(train_filename);  final_testdat <- read.csv(test_filename)
+# Take a look at the data...
+str(alldat)
+```
+
+There seem to be many columns that consist of nothing but NA's, and some that consist mostly of "". These variables will be eliminated as potential predictors since they hold little information, and including them will tend to needlessly increase the variance of our model.
+
+```{r}
+unique(colSums(is.na(alldat)))
+```
+
+Indeed, each variable has either 0 or 19216 NA's, which means each column has either zero NA's or is almost all NA's (98%). 
+
+```{r}
+unique(colSums(alldat[sapply(alldat, is.factor)] == ""))
+```
+
+Similarly, we also find factor columns where 98% of the columns are "". We now delete these information impoverished columns.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+i <- colSums(is.na(alldat)) > 100
+alldat <- alldat[, !i];  final_testdat <- final_testdat[, !i]
+
+i <- colSums(alldat == "") > 100
+alldat <- alldat[, !i];  final_testdat <- final_testdat[, !i]
+```
+
+There are also 3 columns of data relating to time; we'll delete them all, as time shouldn't be a relevant variable for this data. Also the first column, x, is just the row number, so we'll delete that too, along with the subject's name. There are also two variables dealing with "windows" that don't seem particularly relevant to the task at hand, so out they go too.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+cols_to_delete <- 1:7
+alldat <- alldat[, -cols_to_delete];  final_testdat <- final_testdat[, -cols_to_delete]
+final_testdat$problem_id <- NULL   # These are just the row numbers again!
+```
+
+Variables that are highly correlated are problematic when it comes to creating predictive models, so we will also delete such redundancies. Whenever two columns are correlated at 0.9 or higher, one will be deleted. We won't be losing significant predictive power.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+library(caret)
+dat <- alldat[, -53]   # the last column (classe) is a factor
+descrCorr <- cor(dat)
+highCorr <- findCorrelation(descrCorr, 0.9)  # the indices of the columns to be culled
+dat <- dat[, -highCorr]
+# We need the first and last columns..
+alldat <- cbind(dat, classe = alldat$classe)
+# We must also do this to the final test set.
+final_testdat <- final_testdat[, -highCorr]
+```
+
+After all that carnage, we are left with 45 covariates along with our predictor variable, *classe*. Next we'll split our data set into a training and a test set (not to be confused with our final test set of 20 observations). The available data is split 70% for training and 30% for an out-of-sample test for our model.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+set.seed(2718)
+trainIndex = createDataPartition(alldat$classe, p = 0.70, list = FALSE)
+traindat <- alldat[trainIndex,]; testdat <- alldat[-trainIndex,]
+```
+
+
+### Model Construction
+
+Since the predictor variable is categorical, we'll use a random forest model. With these models there's no preprocessing needed as there is for many other models (like neural networks, SVM, etc.) where the data must be centered first.
+
+To speed things up, we first load a parallel processing library. (Strangely, this worked well on my Ubuntu 14.04 system with 16 cores, but didn't use the extras cores when I ran it on my Ubuntu 12.10 laptop with 8 cores.)
+
+```{r results='hide', message=FALSE, warning=FALSE}
+#install.packages("doMC")
+library(doMC)
+registerDoMC(cores = 14)
+```
+
+Our random forest model use the caret function *train*'s default settings, as is recommended. Caret's *train* function only allows for the parameter *mtry* (the number of features to fit per tree) to be fit, and since the default is the floor function of the square root of the number of columns (in this case that equals 7), we used cross validation with its default settings (10-fold cross validation, 500 trees, etc.) to see if we could find a better value for *mtry* near the default value of 7.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+set.seed(2014)
+
+my.grid <- expand.grid(.mtry = c(5, 6, 7, 8, 9, 10, 11)) 
+
+rfTrain <- train(classe ~ .,
+                 data = traindat,
+                 method = "rf",
+                 trControl = trainControl(method = "cv"),
+                 tuneGrid = my.grid,
+                 importance = TRUE   # varImpPlot(rf.fit) 
+                 )
+```
+
+```{r}
+rfTrain
+par(mfrow = c(1, 2))
+plot(rfTrain, xlab = "Number of Variates per Tree")
+plot(rfTrain, metric = "Kappa", xlab = "Number of Variates per Tree")
+```
+
+Cross validation reveals that the default value for the number of features to fit per tree, which for this dataset is 7, wasn't the optimal one after all (though it too would have worked for this assignment); 8 was slightly better. We also see high accuracies of over 99%!
+
+
+### Model Performance
+
+Let's see how well our random forest model predicts the training set.
+
+```{r}
+traindat.predictions <- predict(rfTrain)
+sum(traindat$classe != traindat.predictions)  # 0, perfect predictions!
+```
+
+Our model has 0 errors on the training set. Next we'll see how our model does predicting our set-aside labeled test set.
+ 
+```{r}
+testdat.predictions <- predict(rfTrain, newdata = testdat[, -46])
+testaccuracy <- 1 - sum(testdat$classe != testdat.predictions) / length(testdat$classe)
+testaccuracy
+confusionMatrix(data=testdat$classe, testdat.predictions)
+```
+
+Our random forest model attained 99.4% accuracy on our test set. The confusion matrix shows that the most common classification errors involve labeling C's as D's, but the overall sensitivity of 99.8% and specificity of 99.9% look great! Finally we compute our model's prediction on the final test set of 20 cases for submission.
+
+```{r}
+final_testdat.predictions  <- predict(rfTrain, newdata = final_testdat)
+final_testdat.predictions
+```
+
+Output the files for submission using a script provided in the assignment instructions.
+
+```{r results='hide', message=FALSE, warning=FALSE}
+answers <- as.character(final_testdat.predictions)
+
+# The following code was provided in the assignment instructions 
+# to generate the required output files.
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+```
+
+### Summary
+
+These were all classified correctly, according to the grader, as expected, given the high accuracy of our out-of-sample estimate. However, the tuning we did using cross-validation turned out not really necessary, as the default parameter settings for random forests (rf) using the caret package's *train* function would have worked just as well for this data set. In fact, my readings on random forests suggest that one may be increasing the bias of one's model by attempting to optimize the model's parameters. Nonetheless, it's a happy day when any machine learning algorithm achieves over 99% accuracy!
+
+
+
+
